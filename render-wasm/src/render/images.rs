@@ -62,7 +62,7 @@ enum StoredImage {
 pub struct ImageStore {
     images: HashMap<(Uuid, bool), StoredImage>,
     /// GPU context for decoding images to textures. `None` in headless mode,
-    /// where image fills are skipped (other shapes render normally).
+    /// where image fills are decoded on the CPU instead (see `get_cpu_image`).
     context: Option<Box<DirectContext>>,
 }
 

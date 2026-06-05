@@ -10,8 +10,14 @@
     "url": "https://github.com/penpot/penpot"
   },
   "type": "module",
+  "scripts": {
+    "test:headless": "node --test visual-tests/",
+    "test:headless:update": "UPDATE_SNAPSHOTS=1 node --test visual-tests/"
+  },
   "devDependencies": {
     "@types/node": "^20.12.7",
-    "esbuild": "^0.27.4"
+    "esbuild": "^0.27.4",
+    "pixelmatch": "^6.0.0",
+    "pngjs": "^7.0.0"
   }
 }
