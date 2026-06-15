@@ -34,7 +34,8 @@ performance/
 │   ├── workspace-edit-concurrent.js # Concurrent editing: same-file or multi-file mode
 │   ├── file-size-matrix.js         # File size matrix: latency vs shape count (10, 100, 500, 1000)
 │   ├── media-upload.js             # Image uploads: SVG/PNG direct, JPG chunked
-│   └── font-upload.js              # Font uploads: TTF+OTF chunked, create-font-variant
+│   ├── font-upload.js              # Font uploads: TTF+OTF chunked, create-font-variant
+│   └── compare-results.cjs         # Compare two k6 JSON results for regression
 ├── results/                 # k6 JSON output (gitignored)
 └── baselines/               # for regression baselines
 ```
@@ -111,14 +112,15 @@ Setup is sequential (~0.13ms/user with `derive-password-weak`), excluded from k6
 | Phase 3 – Scenarios | **Done** | `./run.sh all` runs all flows in parallel |
 | Phase 4 – Concurrent Editing | **Done** | `workspace-edit-concurrent.js` with same-file and multi-file modes |
 | Phase 4 – File Size Matrix | **Done** | `file-size-matrix.js` with 4 tiers (10, 100, 500, 1000 shapes) |
-| Phase 5 – CI & Reporting | **Not started** | Grafana dashboards, regression guard |
+| Phase 5 – Regression Guard | **Done** | `compare-results.cjs` + CI workflow (relative comparison) |
+| Phase 5 – Grafana Dashboards | **Deferred** | No Prometheus remote write or InfluxDB in current stack |
 
 ### Immediate Next Steps
 
 1. ~~Phase 2 – Fast password for demo users~~ ✅ Done
 2. ~~Phase 4: File size matrix (`update-file` latency vs shape count: 10, 100, 500, 1000 shapes).~~ ✅ Done — `file-size-matrix.js` with 4 tiers
 3. ~~Phase 4: Concurrent editing test (2–3 VUs per file, measure conflict rate).~~ ✅ Done — `workspace-edit-concurrent.js` with same-file and multi-file modes
-4. Phase 5: Grafana dashboard panels (p95 latency by RPC, error rate, JVM, DB pool).
+4. ~~Phase 5: Regression guard — implement `compare-results.cjs` and CI workflow.~~ ✅ Done
 5. ~~Add `--scenario` flag to `run.sh`~~ ✅ Done
 6. Write `viewer.js` — `get-view-only-bundle` + `get-comment-threads` (deferred per user request).
 
@@ -504,14 +506,14 @@ Run `workspace-edit.js` against each tier separately and plot:
 1. **Runner script (`run.sh`):**
    - `./run.sh smoke` for a 1-VU, 1-iteration smoke test. ✅ Done
    - `./run.sh lifecycle -v 100 -n 10` for the standard run.
-   - Add `--scenario` flag to run individual flows or the full mix.
+   - Add `--scenario` flag to run individual flows or the full mix. ✅ Done
 
 2. **Output:**
    - k6 JSON/CSV output to `performance/results/<timestamp>/`.
    - Prometheus snapshot diff (before vs after).
    - Grafana screenshot or dashboard export.
 
-3. **Grafana Dashboard:**
+3. **Grafana Dashboard:** *(Deferred — no Prometheus remote write or InfluxDB configured in current stack)*
    - Panel: `p95 latency by RPC command` (from `rpc_main_timing_seconds`).
    - Panel: `HTTP requests/sec` (from k6).  
    - Panel: `Error rate by command` (from k6).
@@ -520,9 +522,19 @@ Run `workspace-edit.js` against each tier separately and plot:
    - Panel: `update-file conflict rate` (custom metric from k6).
    - Panel: `File size vs latency` (from the matrix test).
 
-4. **Regression guard:**
-   - Store baseline results in `performance/baselines/`.
-   - After any backend change, run the baseline scenario. If p95 increases by >20% for any critical command, fail the CI step.
+4. **Regression guard (relative comparison):**
+   - **Approach:** Run performance tests twice in the same CI job — once on base branch, once on PR branch. Compare p95/p99 directly. No stored baselines needed.
+   - **Trigger:** Only when backend files change (`backend/src/**`).
+   - **Comparison script:** `scripts/compare-results.js` — parses two k6 JSON outputs, compares p50/p95/p99 for each RPC command.
+   - **Threshold:** Fail if p95 increases >20% for any critical command (`get-file`, `update-file`, `login-with-password`, `create-demo-profile`).
+   - **Workflow:**
+     1. Checkout base branch (main)
+     2. Run performance tests → store as "baseline"
+     3. Checkout PR branch
+     4. Run performance tests → store as "current"
+     5. Compare baseline vs current
+     6. If p95 increases >20% → fail CI
+   - **Advantages:** Same hardware, same conditions. No stored baselines. Only runs when backend changes.
 
 ---
 
@@ -581,5 +593,5 @@ Run `workspace-edit.js` against each tier separately and plot:
 ---
 
 **Plan Author:** Senior Software Architect
-**Status:** Phase 1–4 complete. All core scripts implemented. Phase 5 (CI & Reporting) remains.
+**Status:** Phase 1–5 complete. Regression guard implemented (relative comparison). Grafana dashboards deferred.
 

@@ -56,6 +56,7 @@ Commands:
   font-upload     Upload fonts via chunked upload + create-font-variant
   concurrent-edit Concurrent editing: same-file or multi-file mode
   file-size-matrix  Measure latency vs file size (10, 100, 500, 1000 shapes)
+  compare         Compare two k6 JSON results for regression
   all             Run all scenarios together (orchestrator)
   clean           Remove test results
   help            Show this help
@@ -293,6 +294,35 @@ cmd_file_size_matrix() {
   run_script "file-size-matrix.js" "file-size-matrix"
 }
 
+cmd_compare() {
+  local baseline="$1"
+  local current="$2"
+  local threshold="${3:-20}"
+
+  if [[ -z "$baseline" || -z "$current" ]]; then
+    echo "Usage: ./run.sh compare <baseline.json> <current.json> [threshold]"
+    echo ""
+    echo "Compare two k6 JSON results for performance regression."
+    echo ""
+    echo "Arguments:"
+    echo "  baseline.json   k6 JSON output from base branch"
+    echo "  current.json    k6 JSON output from PR branch"
+    echo "  threshold       Fail if p95 increases > N% (default: 20)"
+    exit 1
+  fi
+
+  if [[ ! -f "$baseline" ]]; then
+    echo "Error: Baseline file not found: $baseline" >&2
+    exit 1
+  fi
+  if [[ ! -f "$current" ]]; then
+    echo "Error: Current file not found: $current" >&2
+    exit 1
+  fi
+
+  node "$SCRIPT_DIR/scripts/compare-results.cjs" "$baseline" "$current" --threshold "$threshold"
+}
+
 cmd_clean() {
   local results_dir="$SCRIPT_DIR/results"
   if [[ -d "$results_dir" ]]; then
@@ -374,6 +404,7 @@ case "$command" in
   font-upload)     cmd_font_upload ;;
   concurrent-edit) cmd_concurrent_edit ;;
   file-size-matrix) cmd_file_size_matrix ;;
+  compare)         cmd_compare "$@" ;;
   all)             cmd_all ;;
   clean)           cmd_clean ;;
   help|-h|--help)  usage ;;
