@@ -65,12 +65,16 @@ pub fn stroke_to_path(
     // Center strokes skip the conversion: fill_path_with_paint
     // already produces correctly-wound contours.
     let final_path = match render_kind {
-        StrokeKind::Inner => stroke_outline
-            .op(&transformed_shape_path, skia::PathOp::Intersect)
-            .unwrap_or(stroke_outline),
-        StrokeKind::Outer => stroke_outline
-            .op(&transformed_shape_path, skia::PathOp::Difference)
-            .unwrap_or(stroke_outline),
+        StrokeKind::Inner => {
+            stroke_outline
+                .op(&transformed_shape_path, skia::PathOp::Intersect)
+                .unwrap_or(stroke_outline)
+        }
+        StrokeKind::Outer => {
+            stroke_outline
+                .op(&transformed_shape_path, skia::PathOp::Difference)
+                .unwrap_or(stroke_outline)
+        }
         StrokeKind::Center => stroke_outline,
     };
 
