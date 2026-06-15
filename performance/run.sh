@@ -15,6 +15,7 @@
 #   ./run.sh workspace-edit                 # Write-heavy file edit loop
 #   ./run.sh media-upload                   # Direct + chunked image uploads
 #   ./run.sh font-upload                    # Chunked font upload + variant creation
+#   ./run.sh concurrent-edit                # Concurrent editing (same-file or multi-file)
 #   ./run.sh all                            # Run all scenarios together (orchestrator)
 #   ./run.sh clean                          # Remove test results
 
@@ -31,6 +32,9 @@ VUS=""
 ITER=""
 REGISTER_MODE="${PENPOT_REGISTER_MODE:-demo}"
 K6="${K6:-k6}"
+EDIT_MODE="${PENPOT_EDIT_MODE:-same-file}"
+FILE_COUNT="${PENPOT_FILE_COUNT:-1}"
+VUS_PER_FILE="${PENPOT_VUS_PER_FILE:-1}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,6 +54,7 @@ Commands:
   workspace-edit  Write-heavy: repeatedly edit a file (get-file + update-file loop)
   media-upload    Upload images of varying sizes (direct + chunked)
   font-upload     Upload fonts via chunked upload + create-font-variant
+  concurrent-edit Concurrent editing: same-file or multi-file mode
   all             Run all scenarios together (orchestrator)
   clean           Remove test results
   help            Show this help
@@ -61,9 +66,17 @@ Options:
   -m MODE     Register mode: 'demo' or 'register' (default: $REGISTER_MODE)
   -k PATH     Path to k6 binary (default: $K6)
 
+Concurrent-edit options:
+  --mode MODE       'same-file' or 'multi-file' (default: $EDIT_MODE)
+  --files NUM       Number of files for multi-file mode (default: $FILE_COUNT)
+  --vus-per-file NUM  VUs per file for multi-file mode (default: $VUS_PER_FILE)
+
 Environment variables:
   PENPOT_BASE_URL      Same as -u
   PENPOT_REGISTER_MODE Same as -m
+  PENPOT_EDIT_MODE     Same as --mode
+  PENPOT_FILE_COUNT    Same as --files
+  PENPOT_VUS_PER_FILE  Same as --vus-per-file
   K6                   Same as -k
 
 Examples:
@@ -71,6 +84,8 @@ Examples:
   $(basename "$0") lifecycle -v 10 -n 5
   $(basename "$0") workspace-edit -v 20 -n 50
   $(basename "$0") media-upload -u https://penpot.example.com
+  $(basename "$0") concurrent-edit --mode same-file -v 5 -n 10
+  $(basename "$0") concurrent-edit --mode multi-file --files 3 --vus-per-file 2 -n 10
   $(basename "$0") all -v 50
 EOF
 }
@@ -85,7 +100,11 @@ check_k6() {
 
 # Build k6 env flags
 k6_env_flags() {
-  echo "--env PENPOT_BASE_URL=$BASE_URL --env PENPOT_REGISTER_MODE=$REGISTER_MODE"
+  local flags="--env PENPOT_BASE_URL=$BASE_URL --env PENPOT_REGISTER_MODE=$REGISTER_MODE --env PENPOT_EDIT_MODE=$EDIT_MODE --env PENPOT_FILE_COUNT=$FILE_COUNT --env PENPOT_VUS_PER_FILE=$VUS_PER_FILE"
+  if [[ -n "${PENPOT_TOTAL_VUS:-}" ]]; then
+    flags="$flags --env PENPOT_TOTAL_VUS=$PENPOT_TOTAL_VUS"
+  fi
+  echo "$flags"
 }
 
 # Build k6 VU/iteration flags (only if explicitly set)
@@ -225,6 +244,36 @@ cmd_media_upload()    { check_k6; run_script "media-upload.js" "media-upload"; }
 cmd_font_upload()     { check_k6; run_script "font-upload.js" "font-upload"; }
 cmd_all()             { check_k6; run_all; }
 
+cmd_concurrent_edit() {
+  check_k6
+
+  local label="concurrent-edit-${EDIT_MODE}"
+  if [[ "$EDIT_MODE" == "multi-file" ]]; then
+    label="${label}-${FILE_COUNT}files-${VUS_PER_FILE}vpu"
+  fi
+
+  echo ""
+  echo "=== Concurrent Edit ($EDIT_MODE) ==="
+  echo "  Mode:           $EDIT_MODE"
+  if [[ "$EDIT_MODE" == "multi-file" ]]; then
+    echo "  Files:          $FILE_COUNT"
+    echo "  VUs per file:   $VUS_PER_FILE"
+    local total_vus=$((FILE_COUNT * VUS_PER_FILE))
+    echo "  Total VUs:      $total_vus"
+  else
+    [[ -n "$VUS" ]] && echo "  VUs:            $VUS"
+  fi
+  [[ -n "$ITER" ]] && echo "  Iterations:     $ITER"
+  echo ""
+
+  # For same-file mode, pass VUS as PENPOT_TOTAL_VUS so setup() knows how many pages to create
+  if [[ "$EDIT_MODE" == "same-file" && -n "$VUS" ]]; then
+    export PENPOT_TOTAL_VUS="$VUS"
+  fi
+
+  run_script "workspace-edit-concurrent.js" "$label"
+}
+
 cmd_clean() {
   local results_dir="$SCRIPT_DIR/results"
   if [[ -d "$results_dir" ]]; then
@@ -241,6 +290,32 @@ cmd_clean() {
 
 # Parse global options first (before command)
 parse_opts() {
+  # First, extract long options (--mode, --files, --vus-per-file)
+  local args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --mode)
+        EDIT_MODE="$2"
+        shift 2
+        ;;
+      --files)
+        FILE_COUNT="$2"
+        shift 2
+        ;;
+      --vus-per-file)
+        VUS_PER_FILE="$2"
+        shift 2
+        ;;
+      *)
+        args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  # Now parse short options with getopts
+  set -- "${args[@]}"
+  OPTIND=1
   while getopts "u:v:n:m:k:h" opt; do
     case "$opt" in
       u) BASE_URL="$OPTARG" ;;
@@ -268,8 +343,6 @@ case "$command" in
     ;;
   *)
     parse_opts "$@"
-    # Consume parsed opts
-    while getopts "u:v:n:m:k:h" _ 2>/dev/null; do shift $((OPTIND - 1)); done 2>/dev/null || true
     ;;
 esac
 
@@ -280,6 +353,7 @@ case "$command" in
   workspace-edit)  cmd_workspace_edit ;;
   media-upload)    cmd_media_upload ;;
   font-upload)     cmd_font_upload ;;
+  concurrent-edit) cmd_concurrent_edit ;;
   all)             cmd_all ;;
   clean)           cmd_clean ;;
   help|-h|--help)  usage ;;

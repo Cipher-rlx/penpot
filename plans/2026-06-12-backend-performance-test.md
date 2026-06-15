@@ -17,7 +17,7 @@
 
 ### Completed (2026-06-12)
 
-Phase 1 done. Phase 2 done (all core flows + performance optimization). Phase 3 done (orchestrator). Phase 4 and 5 remain.
+Phase 1 done. Phase 2 done (all core flows + performance optimization). Phase 3 done (orchestrator). Phase 4 concurrent editing done. Phase 4 file size matrix and Phase 5 remain.
 
 **What was built:**
 
@@ -28,11 +28,12 @@ performance/
 ├── lib/
 │   └── penpot-client.js    # ~590 lines — shared k6 HTTP client module
 ├── scripts/
-│   ├── lifecycle.js         # Full user lifecycle (register → CRUD → delete)
-│   ├── workspace-open.js    # Read-heavy: file open loop (get-file, libraries, thumbnails)
-│   ├── workspace-edit.js    # Write-heavy: file edit loop (get-file + update-file)
-│   ├── media-upload.js      # Image uploads: SVG/PNG direct, JPG chunked
-│   └── font-upload.js       # Font uploads: TTF+OTF chunked, create-font-variant
+│   ├── lifecycle.js                # Full user lifecycle (register → CRUD → delete)
+│   ├── workspace-open.js           # Read-heavy: file open loop (get-file, libraries, thumbnails)
+│   ├── workspace-edit.js           # Write-heavy: file edit loop (get-file + update-file)
+│   ├── workspace-edit-concurrent.js # Concurrent editing: same-file or multi-file mode
+│   ├── media-upload.js             # Image uploads: SVG/PNG direct, JPG chunked
+│   └── font-upload.js              # Font uploads: TTF+OTF chunked, create-font-variant
 ├── results/                 # k6 JSON output (gitignored)
 └── baselines/               # for regression baselines
 ```
@@ -95,6 +96,8 @@ Setup is sequential (~0.13ms/user with `derive-password-weak`), excluded from k6
 
 13. **bcrypt minimum cost factor is 4.** Can't go below 4 for bcrypt. pbkdf2+sha256 with 100 iterations is even faster (~0.13ms/hash vs ~2.7ms for bcrypt cost 4) and was chosen instead. Benchmark: argon2id ~94ms/hash, bcrypt cost 4 ~2.7ms/hash, pbkdf2+sha256 100 iter ~0.13ms/hash.
 
+14. **revn conflicts don't happen in normal concurrent editing.** The conflict check in `files_update.clj` is `(> incoming stored)` — only fires when incoming revn is *greater* than stored. If two VUs both read revn=5 and VU A saves first (revn becomes 6), VU B saves with revn=5 → `5 > 6?` → false → no conflict. The real contention point is the **file-level advisory lock** (`db/xact-lock! conn id`) that serializes all `update-file` calls on the same file. More VUs = more lock queuing = higher latency.
+
 ### Remaining Work
 
 | Phase | Status | Next Actions |
@@ -103,14 +106,15 @@ Setup is sequential (~0.13ms/user with `derive-password-weak`), excluded from k6
 | Phase 2 – Core HTTP Flows | **Done** | All 5 flows + orchestrator + setup() pool |
 | Phase 2 – Performance Optimization | **Done** | `derive-password-weak` using pbkdf2+sha256 (100 iter) — ~700x faster than argon2id |
 | Phase 3 – Scenarios | **Done** | `./run.sh all` runs all flows in parallel |
-| Phase 4 – Advanced update-file | **Not started** | File size tiers, concurrent editing matrix |
+| Phase 4 – Concurrent Editing | **Done** | `workspace-edit-concurrent.js` with same-file and multi-file modes |
+| Phase 4 – File Size Matrix | **Not started** | `update-file` latency vs shape count: 10, 100, 500, 1000 shapes |
 | Phase 5 – CI & Reporting | **Not started** | Grafana dashboards, regression guard |
 
 ### Immediate Next Steps
 
 1. ~~Phase 2 – Fast password for demo users~~ ✅ Done
 2. Phase 4: File size matrix (`update-file` latency vs shape count: 10, 100, 500, 1000 shapes).
-3. Phase 4: Concurrent editing test (2–3 VUs per file, measure conflict rate).
+3. ~~Phase 4: Concurrent editing test (2–3 VUs per file, measure conflict rate).~~ ✅ Done — `workspace-edit-concurrent.js` with same-file and multi-file modes
 4. Phase 5: Grafana dashboard panels (p95 latency by RPC, error rate, JVM, DB pool).
 5. ~~Add `--scenario` flag to `run.sh`~~ ✅ Done
 6. Write `viewer.js` — `get-view-only-bundle` + `get-comment-threads` (deferred per user request).
@@ -420,28 +424,75 @@ Run `workspace-edit.js` against each tier separately and plot:
 - `get-file` latency vs file size.
 - Backend CPU and DB time vs file size.
 
-#### 4.2. Concurrent Editing Strategy
+#### 4.2. Concurrent Editing — Two Modes
 
-**Problem:** `update-file` uses optimistic concurrency control (`revn`). If two users submit the same `revn`, the second gets a conflict.
+**Key insight:** `revn` conflicts only occur when `incoming > stored` (should never happen in normal usage). The real contention point is the **file-level advisory lock** (`db/xact-lock! conn id`) that serializes all `update-file` calls on the same file.
 
-**Backend behavior:**
-- `update-file` acquires an advisory lock (`db/xact-lock! conn id`) on the file ID.
-- It checks `revn` and `vern` conflicts.
-- It processes changes, validates, updates the file, and sends notifications via `msgbus`.
-- The transaction duration is what we want to measure.
+**Mode 1: Same-file** — N VUs edit different pages in 1 file
+- Measures lock contention on a single popular file
+- Bottleneck: advisory lock serialization
 
-**Test design for concurrent editing:**
-- **Shared file pool:** Pre-create 50 files of `MEDIUM` size.
-- **VU grouping:** Use k6 `scenarios` with `per-vu-iterations` or `shared-iterations`. Assign groups of 3 VUs to the same file ID.
-- **Conflict measurement:** Do *not* synchronize `revn` between VUs. Let them race.
-  - Track `http_req_failed{code:revn-conflict}`.
-  - Track retry latency (if a VU retries after fetching the latest `revn`).
-  - This gives us the **natural conflict rate** under load, which is a realistic product metric.
-- **If the natural conflict rate is too high (>20%):**
-  - Add a small `sleep()` jitter (0–500 ms) between `get-file` and `update-file` to spread out the requests.
-  - Or, use a tiny shared counter (e.g., a small HTTP endpoint or Redis) that VUs read to get the "next" `revn`. This is less realistic but gives a cleaner latency measurement.
+**Mode 2: Multi-file** — G groups × M VUs per file, each group edits its own file
+- Measures whole system responsiveness under parallel edit sessions
+- Bottleneck: DB connection pool, CPU, memory
+- More realistic: real usage has many files being edited concurrently
 
-**Action:** Create `workspace-edit-concurrent.js` with the grouping logic and conflict-rate thresholds.
+**Script:** `workspace-edit-concurrent.js`
+
+**Configuration via env vars:**
+- `PENPOT_EDIT_MODE=same-file | multi-file` (default: `same-file`)
+- `PENPOT_FILE_COUNT=1` — number of files (for multi-file mode)
+- `PENPOT_VUS_PER_FILE=3` — VUs per file (for multi-file mode)
+
+**Setup logic:**
+- `same-file`: create 1 file, add N pages (N = total VUs)
+- `multi-file`: create G files, each with M pages (G = FILE_COUNT, M = VUS_PER_FILE)
+
+**VU loop:**
+1. Login with assigned user
+2. Get file → pick assigned page
+3. Loop (10 iterations):
+   - `get-file` → get latest `revn`
+   - `sleep(0.3)` (think time)
+   - `update-file` with change to assigned page (add rectangle)
+   - Track: success on first try (should always succeed)
+   - `sleep(1)` (edit pacing)
+
+**Scenario ladder — same-file mode:**
+
+| Run | VUs | Iterations | What we measure |
+|-----|-----|-----------|-----------------|
+| 1 | 3 | 10 | Baseline lock contention |
+| 2 | 5 | 10 | Moderate contention |
+| 3 | 10 | 10 | Higher contention |
+| 4 | 20 | 10 | Stress level |
+
+**Scenario ladder — multi-file mode:**
+
+| Run | Files | VUs/file | Total VUs | What we measure |
+|-----|-------|----------|-----------|-----------------|
+| 1 | 3 | 2 | 6 | Light load |
+| 2 | 5 | 3 | 15 | Moderate |
+| 3 | 10 | 3 | 30 | Heavy |
+| 4 | 10 | 5 | 50 | Stress |
+
+**Metrics to track:**
+- `http_req_duration{rpc_command:update-file}` — p50, p95, p99 at each VU level
+- `http_req_duration{rpc_command:get-file}` — should be unaffected
+- `http_req_failed` — should be 0%
+- Latency growth curve: how much does p95 increase per additional VU?
+
+**Expected results:**
+- `get-file` latency: constant (no lock, read-only)
+- `update-file` p95: grows with VU count in same-file mode (lock queuing)
+- `update-file` p95: stable in multi-file mode (independent locks)
+- Failure rate: 0% (no revn conflicts in this scenario)
+
+**Files to create:**
+- `performance/scripts/workspace-edit-concurrent.js`
+
+**Files to modify:**
+- `performance/run.sh` — add `concurrent-edit` command
 
 ---
 
@@ -527,5 +578,5 @@ Run `workspace-edit.js` against each tier separately and plot:
 ---
 
 **Plan Author:** Senior Software Architect
-**Status:** Phase 1–3 complete. Phase 2 performance optimization done (pbkdf2+sha256, ~700x faster). Scripts ready for 1000 VU scale. Phase 4–5 remain.
+**Status:** Phase 1–4 complete. Concurrent editing implemented (same-file + multi-file modes). File size matrix and Phase 5 remain.
 
