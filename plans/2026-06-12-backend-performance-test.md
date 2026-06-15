@@ -17,7 +17,7 @@
 
 ### Completed (2026-06-12)
 
-Phase 1 done. Phase 2 done (all core flows + performance optimization). Phase 3 done (orchestrator). Phase 4 concurrent editing done. Phase 4 file size matrix and Phase 5 remain.
+Phase 1 done. Phase 2 done (all core flows + performance optimization). Phase 3 done (orchestrator). Phase 4 done (concurrent editing + file size matrix). Phase 5 remains.
 
 **What was built:**
 
@@ -32,6 +32,7 @@ performance/
 │   ├── workspace-open.js           # Read-heavy: file open loop (get-file, libraries, thumbnails)
 │   ├── workspace-edit.js           # Write-heavy: file edit loop (get-file + update-file)
 │   ├── workspace-edit-concurrent.js # Concurrent editing: same-file or multi-file mode
+│   ├── file-size-matrix.js         # File size matrix: latency vs shape count (10, 100, 500, 1000)
 │   ├── media-upload.js             # Image uploads: SVG/PNG direct, JPG chunked
 │   └── font-upload.js              # Font uploads: TTF+OTF chunked, create-font-variant
 ├── results/                 # k6 JSON output (gitignored)
@@ -98,6 +99,8 @@ Setup is sequential (~0.13ms/user with `derive-password-weak`), excluded from k6
 
 14. **revn conflicts don't happen in normal concurrent editing.** The conflict check in `files_update.clj` is `(> incoming stored)` — only fires when incoming revn is *greater* than stored. If two VUs both read revn=5 and VU A saves first (revn becomes 6), VU B saves with revn=5 → `5 > 6?` → false → no conflict. The real contention point is the **file-level advisory lock** (`db/xact-lock! conn id`) that serializes all `update-file` calls on the same file. More VUs = more lock queuing = higher latency.
 
+15. **`update-file` response doesn't include `vern`.** The response is `{:revn N, :lagged [...]}`. `vern` only changes on snapshot restore, so it can be kept constant across iterations. Get it from the initial `get-file` call.
+
 ### Remaining Work
 
 | Phase | Status | Next Actions |
@@ -107,13 +110,13 @@ Setup is sequential (~0.13ms/user with `derive-password-weak`), excluded from k6
 | Phase 2 – Performance Optimization | **Done** | `derive-password-weak` using pbkdf2+sha256 (100 iter) — ~700x faster than argon2id |
 | Phase 3 – Scenarios | **Done** | `./run.sh all` runs all flows in parallel |
 | Phase 4 – Concurrent Editing | **Done** | `workspace-edit-concurrent.js` with same-file and multi-file modes |
-| Phase 4 – File Size Matrix | **Not started** | `update-file` latency vs shape count: 10, 100, 500, 1000 shapes |
+| Phase 4 – File Size Matrix | **Done** | `file-size-matrix.js` with 4 tiers (10, 100, 500, 1000 shapes) |
 | Phase 5 – CI & Reporting | **Not started** | Grafana dashboards, regression guard |
 
 ### Immediate Next Steps
 
 1. ~~Phase 2 – Fast password for demo users~~ ✅ Done
-2. Phase 4: File size matrix (`update-file` latency vs shape count: 10, 100, 500, 1000 shapes).
+2. ~~Phase 4: File size matrix (`update-file` latency vs shape count: 10, 100, 500, 1000 shapes).~~ ✅ Done — `file-size-matrix.js` with 4 tiers
 3. ~~Phase 4: Concurrent editing test (2–3 VUs per file, measure conflict rate).~~ ✅ Done — `workspace-edit-concurrent.js` with same-file and multi-file modes
 4. Phase 5: Grafana dashboard panels (p95 latency by RPC, error rate, JVM, DB pool).
 5. ~~Add `--scenario` flag to `run.sh`~~ ✅ Done
@@ -578,5 +581,5 @@ Run `workspace-edit.js` against each tier separately and plot:
 ---
 
 **Plan Author:** Senior Software Architect
-**Status:** Phase 1–4 complete. Concurrent editing implemented (same-file + multi-file modes). File size matrix and Phase 5 remain.
+**Status:** Phase 1–4 complete. All core scripts implemented. Phase 5 (CI & Reporting) remains.
 

@@ -55,6 +55,7 @@ Commands:
   media-upload    Upload images of varying sizes (direct + chunked)
   font-upload     Upload fonts via chunked upload + create-font-variant
   concurrent-edit Concurrent editing: same-file or multi-file mode
+  file-size-matrix  Measure latency vs file size (10, 100, 500, 1000 shapes)
   all             Run all scenarios together (orchestrator)
   clean           Remove test results
   help            Show this help
@@ -86,6 +87,7 @@ Examples:
   $(basename "$0") media-upload -u https://penpot.example.com
   $(basename "$0") concurrent-edit --mode same-file -v 5 -n 10
   $(basename "$0") concurrent-edit --mode multi-file --files 3 --vus-per-file 2 -n 10
+  $(basename "$0") file-size-matrix -n 10
   $(basename "$0") all -v 50
 EOF
 }
@@ -274,6 +276,23 @@ cmd_concurrent_edit() {
   run_script "workspace-edit-concurrent.js" "$label"
 }
 
+cmd_file_size_matrix() {
+  check_k6
+
+  echo ""
+  echo "=== File Size Matrix ==="
+  echo "  Tiers:          small(10), medium(100), large(500), xlarge(1000)"
+  [[ -n "$ITER" ]] && echo "  Iterations:     $ITER (per tier)"
+  echo ""
+
+  # Pass iterations as env var for the script
+  if [[ -n "$ITER" ]]; then
+    export PENPOT_MATRIX_ITERATIONS="$ITER"
+  fi
+
+  run_script "file-size-matrix.js" "file-size-matrix"
+}
+
 cmd_clean() {
   local results_dir="$SCRIPT_DIR/results"
   if [[ -d "$results_dir" ]]; then
@@ -354,6 +373,7 @@ case "$command" in
   media-upload)    cmd_media_upload ;;
   font-upload)     cmd_font_upload ;;
   concurrent-edit) cmd_concurrent_edit ;;
+  file-size-matrix) cmd_file_size_matrix ;;
   all)             cmd_all ;;
   clean)           cmd_clean ;;
   help|-h|--help)  usage ;;
