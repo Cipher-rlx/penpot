@@ -7,7 +7,7 @@
 (ns app.rpc.commands.demo
   "A demo specific mutations."
   (:require
-   [app.auth :refer [derive-password]]
+   [app.auth :refer [derive-password-weak]]
    [app.common.exceptions :as ex]
    [app.common.time :as ct]
    [app.common.uuid :as uuid]
@@ -48,7 +48,7 @@
                   :is-active true
                   :is-demo true
                   :deleted-at (ct/in-future (cf/get-deletion-delay))
-                  :password (derive-password password)
+                  :password (derive-password-weak password)
                   :props {}}
         profile  (db/tx-run! cfg (fn [cfg]
                                    (->> (auth/create-profile cfg params)
