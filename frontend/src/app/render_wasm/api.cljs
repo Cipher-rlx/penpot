@@ -1279,6 +1279,14 @@
 (defn view-interaction-start!
   []
   (when-not @view-interaction-active?
+    ;; A new pan/zoom gesture must not resume a stale partial render from a
+    ;; previous viewport — that leaves pending tiles/nodes out of sync with the
+    ;; current viewbox and the final frame may never be presented.
+    (when wasm/internal-frame-id
+      (js/cancelAnimationFrame wasm/internal-frame-id)
+      (set! wasm/internal-frame-id nil))
+    (reset! pending-render false)
+    (set! wasm/internal-frame-type FRAME_TYPE_NONE)
     (h/call wasm/internal-module "_set_view_start")
     (reset! view-interaction-active? true)))
 
@@ -1296,6 +1304,10 @@
             ;; to prevent errors when navigating quickly
             (when (initialized?)
               (view-interaction-end!)
+              ;; Always start a fresh render loop after a gesture ends.
+              ;; If internal-frame-type is still PARTIAL from an interrupted
+              ;; render, _render would call continue_render_loop with stale state.
+              (set! wasm/internal-frame-type FRAME_TYPE_NONE)
               ;; Use async _render: visible tiles render synchronously
               ;; (no yield), interest-area tiles render progressively
               ;; via rAF.  _set_view_end already rebuilt the tile

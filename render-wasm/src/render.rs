@@ -417,7 +417,7 @@ pub struct InteractiveDragCrop {
     /// Viewbox origin (doc-space) at capture time.
     pub capture_vb_left: f32,
     pub capture_vb_top: f32,
-    /// Backbuffer pixel origin used for `snapshot_rect` (so we can do 1:1 blits).
+    /// Backbuffer pixel origin used for 1:1 blits during drag-crop capture.
     pub capture_src_left: i32,
     pub capture_src_top: i32,
     pub image: skia::Image,
@@ -1885,14 +1885,8 @@ impl RenderState {
         let (bb_w, bb_h) = self.surfaces.surface_size(SurfaceId::Backbuffer);
         let max_snap_px = get_gpu_state().max_texture_size();
 
-        // Snapshot the atlas once for the whole pass so that all shapes sharing
-        // the tile/atlas fallback path reuse the same GPU image rather than each
-        // triggering a separate `image_snapshot` flush.
-        let atlas_snap = self.surfaces.atlas.snapshot_for_drag_crop();
-
-        // Scratch surface reused across all shapes that need the tile/atlas
-        // fallback — avoids one WebGL texture allocation per shape.
-        // Created lazily on first use and grown if a later shape needs more space.
+        // Scratch surface reused across all shapes — avoids one WebGL texture
+        // allocation per shape. Created lazily on first use and grown if needed.
         let mut scratch_surface: Option<skia::Surface> = None;
 
         for (id, doc_bounds, selrect) in non_overlapping {
@@ -1945,47 +1939,48 @@ impl RenderState {
                 && window_irect.right <= bb_w
                 && window_irect.bottom <= bb_h;
 
-            let backbuffer_snap = if in_backbuffer {
-                self.surfaces
-                    .snapshot_rect(SurfaceId::Backbuffer, window_irect)
-            } else {
-                None
+            let needs_alloc = scratch_surface
+                .as_ref()
+                .is_none_or(|s| s.width() < win_w || s.height() < win_h);
+            if needs_alloc {
+                scratch_surface = get_gpu_state()
+                    .create_surface_with_isize(
+                        "drag_crop_scratch".to_string(),
+                        skia::ISize::new(win_w, win_h),
+                    )
+                    .ok();
+            }
+            let Some(scratch) = scratch_surface.as_mut() else {
+                continue;
             };
 
-            let image = if let Some(img) = backbuffer_snap {
-                img
+            let composed = if in_backbuffer {
+                let src = skia::Rect::from_xywh(
+                    window_irect.left as f32,
+                    window_irect.top as f32,
+                    win_w as f32,
+                    win_h as f32,
+                );
+                self.surfaces.blit_backbuffer_rect_into(scratch, src);
+                true
             } else {
-                // Ensure the scratch surface is large enough for this window.
-                // Grow (reallocate) only when necessary so that the common case
-                // of similarly-sized shapes pays zero extra allocation cost.
-                let needs_alloc = scratch_surface
-                    .as_ref()
-                    .is_none_or(|s| s.width() < win_w || s.height() < win_h);
-                if needs_alloc {
-                    scratch_surface = get_gpu_state()
-                        .create_surface_with_isize(
-                            "drag_crop_scratch".to_string(),
-                            skia::ISize::new(win_w, win_h),
-                        )
-                        .ok();
-                }
-                let Some(scratch) = scratch_surface.as_mut() else {
-                    continue;
-                };
-                let Some(img) = self.surfaces.try_snapshot_doc_rect_from_tiles_and_atlas(
+                self.surfaces.compose_doc_rect_from_tiles_and_atlas(
                     scratch,
-                    atlas_snap.as_ref(),
                     src_doc_window,
                     window_irect,
-                    win_w,
-                    win_h,
                     vb_left,
                     vb_top,
                     scale,
-                ) else {
-                    continue;
-                };
-                img
+                )
+            };
+            if !composed {
+                continue;
+            }
+
+            let Some(image) =
+                scratch.image_snapshot_with_bounds(skia::IRect::new(0, 0, win_w, win_h))
+            else {
+                continue;
             };
 
             self.backbuffer_crop_cache.insert(
@@ -2008,10 +2003,12 @@ impl RenderState {
         performance::begin_measure!("render_from_cache");
         let bg_color = self.background_color;
 
-        // During fast mode (pan/zoom), if a previous full-quality render still has pending tiles,
-        // always prefer the persistent atlas. The atlas is incrementally updated as tiles finish,
-        // and drawing from it avoids mixing a partially-updated Cache surface with missing tiles.
-        if self.options.is_fast_mode() && !self.surfaces.atlas.is_empty() {
+        let zooming_in =
+            self.zoom_changed() && self.viewbox.zoom > self.cached_viewbox.zoom;
+
+        // During fast mode (pan/zoom), prefer the persistent atlas — except on zoom-in,
+        // where the tile cache mosaic is sharper than the upscaled doc atlas.
+        if self.options.is_fast_mode() && !zooming_in && !self.surfaces.atlas.is_empty() {
             self.surfaces
                 .draw_atlas_to_backbuffer(self.viewbox, bg_color);
 
@@ -2102,8 +2099,16 @@ impl RenderState {
                 }
             }
 
-            // Draw directly from cache surface, avoiding snapshot overhead
-            self.surfaces.draw_cache_to_backbuffer();
+            if zooming_in {
+                self.surfaces.draw_cache_to_backbuffer_zoomed(
+                    bg_color,
+                    translate_x,
+                    translate_y,
+                    navigate_zoom,
+                );
+            } else {
+                self.surfaces.draw_cache_to_backbuffer();
+            }
 
             // During pure pan (same zoom), draw tiles from the HashMap
             // on top of the scaled Cache surface.  Cached tile textures
