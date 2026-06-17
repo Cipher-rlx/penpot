@@ -756,12 +756,6 @@ msgstr[1] "%s bibliotecas fueron vinculadas automáticamente por nombre."
 msgid "dashboard.import.resolve-libraries"
 msgstr "Algunas bibliotecas no pudieron vincularse automáticamente. Selecciona la biblioteca correcta para cada una:"
 
-msgid "dashboard.import.library-placeholder"
-msgstr "Selecciona una biblioteca…"
-
-msgid "dashboard.import.library-link-error"
-msgstr "No se pudo vincular la biblioteca"
-
 msgid "dashboard.import.confirm-library-links"
 msgstr "Confirmar vínculos de biblioteca"
 

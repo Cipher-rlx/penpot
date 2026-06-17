@@ -346,33 +346,41 @@
   [{:keys [resolution selections*]}]
   (let [external-libs      (:external-libs resolution)
         library-candidates (:library-candidates resolution)
-        selections         (deref selections*)
+        selections         (deref selections*)]
 
-        on-select
-        (mf/use-fn
-         (mf/deps selections*)
-         (fn [old-lib-id candidate-id]
-           (swap! selections* assoc old-lib-id candidate-id)))]
+    ;; Pre-select the first candidate for each unresolved library so that
+    ;; confirming without interaction still links the default choice.
+    (mf/with-effect []
+      (doseq [[old-lib-id candidates] library-candidates]
+        (when-not (contains? @selections* old-lib-id)
+          (when-let [first-candidate (first candidates)]
+            (swap! selections* assoc old-lib-id (:id first-candidate))))))
 
-    (when (seq library-candidates)
-      [:div {:class (stl/css :library-resolution)}
-       [:p {:class (stl/css :library-resolution-message)}
-        (tr "dashboard.import.resolve-libraries")]
+    (let [on-select
+          (mf/use-fn
+           (mf/deps selections*)
+           (fn [old-lib-id candidate-id]
+             (swap! selections* assoc old-lib-id candidate-id)))]
 
-       (for [{:keys [id name]} external-libs]
-         (let [candidates (get library-candidates id)
-               options    (mapv (fn [c]
-                                  {:id (str (:id c))
-                                   :label (:name c)})
-                                candidates)
-               selected   (get selections id)]
-           [:div {:class (stl/css :library-resolution-item)
-                  :key (dm/str id)}
-            [:div {:class (stl/css :library-resolution-item-name)}
-             name]
-            [:> select* {:options options
-                         :default-selected (or (some-> selected str) "")
-                         :on-change (partial on-select id)}]]))])))
+      (when (seq library-candidates)
+        [:div {:class (stl/css :library-resolution)}
+         [:p {:class (stl/css :library-resolution-message)}
+          (tr "dashboard.import.resolve-libraries")]
+
+         (for [{:keys [id name]} external-libs]
+           (let [candidates (get library-candidates id)
+                 options    (mapv (fn [c]
+                                    {:id (str (:id c))
+                                     :label (:name c)})
+                                  candidates)
+                 selected   (get selections id)]
+             [:div {:class (stl/css :library-resolution-item)
+                    :key (dm/str id)}
+              [:div {:class (stl/css :library-resolution-item-name)}
+               name]
+              [:> select* {:options options
+                           :default-selected (or (some-> selected str) "")
+                           :on-change (partial on-select id)}]]))]))))
 
 (mf/defc import-dialog
   {::mf/register modal/components
@@ -586,8 +594,7 @@
              {:level :success
               :content (tr "dashboard.import.auto-linked-libraries" (i18n/c auto-linked-count))}])
           [:> library-resolution* {:resolution library-resolution
-                                   :selections* library-selections*
-                                   :file-ids (:file-ids library-resolution)}]])
+                                   :selections* library-selections*}]])
 
        (if (or (= :import-error status) (and (= :analyze status) errors?))
          [:div {:class (stl/css :import-error-disclaimer)}

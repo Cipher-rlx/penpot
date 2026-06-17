@@ -931,24 +931,29 @@
   "Auto-link imported files to libraries that have exactly one candidate
   match. Returns a vector of {:id old-lib-id :name string :new-id uuid}
   for each auto-linked library."
-  [{:keys [::db/conn ::manifest ::bfc/timestamp] :as cfg} resolution file-ids]
+  [{:keys [::db/conn ::manifest ::bfc/timestamp ::bfc/profile-id] :as cfg} resolution file-ids]
   (let [external-libs (:external-libraries manifest)]
     (reduce (fn [linked {:keys [id name used-by] :as ext-lib}]
               (let [candidates (get resolution id)]
                 (if (= 1 (count candidates))
                   (let [new-lib-id (:id (first candidates))
-                        ;; Link only files that actually used this library
-                        relevant-file-ids (if (seq used-by)
-                                            (let [used-set (set (map bfc/lookup-index used-by))]
-                                              (filterv used-set file-ids))
-                                            file-ids)]
-                    (doseq [fid relevant-file-ids]
-                      (let [rel-params {:file-id fid
-                                        :library-file-id new-lib-id}]
-                        (db/insert! conn :file-library-rel rel-params
-                                    ::db/on-conflict-do-nothing? true)
-                        (bfc/upsert-file-library-sync! conn (assoc rel-params :synced-at timestamp))))
-                    (conj linked {:id id :name name :new-id new-lib-id}))
+                        perms      (bfc/get-file-permissions conn profile-id new-lib-id)]
+                    ;; Only auto-link when the importer has edit permission
+                    ;; on the matched library, matching the manual link RPC.
+                    (if (:can-edit perms)
+                      (let [;; Link only files that actually used this library
+                            relevant-file-ids (if (seq used-by)
+                                                (let [used-set (set (map bfc/lookup-index used-by))]
+                                                  (filterv used-set file-ids))
+                                                file-ids)]
+                        (doseq [fid relevant-file-ids]
+                          (let [rel-params {:file-id fid
+                                            :library-file-id new-lib-id}]
+                            (db/insert! conn :file-library-rel rel-params
+                                        ::db/on-conflict-do-nothing? true)
+                            (bfc/upsert-file-library-sync! conn (assoc rel-params :synced-at timestamp))))
+                        (conj linked {:id id :name name :new-id new-lib-id}))
+                      linked))
                   linked)))
             []
             external-libs)))

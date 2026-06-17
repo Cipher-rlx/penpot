@@ -12,6 +12,7 @@
    [app.common.features :as cfeat]
    [app.common.pprint :as pp]
    [app.common.thumbnails :as thc]
+   [app.common.time :as ct]
    [app.common.types.shape :as cts]
    [app.common.uuid :as uuid]
    [app.db :as db]
@@ -178,6 +179,12 @@
            (assoc ::bfc/include-libraries false))
        (io/output-stream output))
 
+      ;; Remove the source library to simulate a cross-environment import
+      ;; where the original library does not exist in the target team.
+      (db/update! th/*system* :file
+                  {:deleted-at (ct/now)}
+                  {:id (:id library)})
+
       ;; Now create a new shared library with the same name in the same team
       ;; (simulating the library existing in the target environment)
       (let [library2 (th/create-file* 3 {:profile-id (:id profile)
@@ -229,6 +236,12 @@
            (assoc ::bfc/include-libraries false))
        (io/output-stream output))
 
+      ;; Remove the source library to simulate a cross-environment import
+      ;; where no matching library exists in the target team.
+      (db/update! th/*system* :file
+                  {:deleted-at (ct/now)}
+                  {:id (:id library)})
+
       ;; Import without any matching library in the team
       (let [result (-> th/*system*
                        (assoc ::bfc/project-id (:default-project-id profile))
@@ -267,6 +280,12 @@
            (assoc ::bfc/include-libraries false))
        (io/output-stream output))
 
+      ;; Remove the source library to simulate a cross-environment import
+      ;; where the original library does not exist in the target team.
+      (db/update! th/*system* :file
+                  {:deleted-at (ct/now)}
+                  {:id (:id library)})
+
       ;; Create TWO shared libraries with the same name
       (let [library2 (th/create-file* 3 {:profile-id (:id profile)
                                          :project-id (:default-project-id profile)
@@ -299,3 +318,131 @@
         (let [rels (db/query th/*system* :file-library-rel
                              {:library-file-id (:id library3)})]
           (t/is (= 0 (count rels))))))))
+
+(t/deftest import-auto-link-respects-library-permissions
+  (let [owner   (th/create-profile* 1)
+        team    (th/create-team* 1 {:profile-id (:id owner)})
+        viewer  (th/create-profile* 2)
+        _       (th/create-team-role* {:team-id    (:id team)
+                                       :profile-id (:id viewer)
+                                       :role       :viewer})
+
+        library (th/create-file* 1 {:profile-id (:id owner)
+                                    :project-id (:default-project-id owner)
+                                    :is-shared true
+                                    :name "Icons Library"})
+        file    (th/create-file* 2 {:profile-id (:id owner)
+                                    :project-id (:default-project-id owner)
+                                    :is-shared false})]
+
+    ;; Link file to library
+    (db/insert! th/*system* :file-library-rel
+                {:file-id (:id file)
+                 :library-file-id (:id library)})
+
+    ;; Export without including libraries
+    (let [output (tmp/tempfile :suffix ".zip")]
+      (v3/export-files!
+       (-> th/*system*
+           (assoc ::bfc/ids #{(:id file)})
+           (assoc ::bfc/embed-assets false)
+           (assoc ::bfc/include-libraries false))
+       (io/output-stream output))
+
+      ;; Remove the source library and recreate a matching one owned by owner
+      (db/update! th/*system* :file
+                  {:deleted-at (ct/now)}
+                  {:id (:id library)})
+
+      ;; Create a project in the team for the matched library and import.
+      (let [project  (th/create-project* 1 {:profile-id (:id owner)
+                                            :team-id    (:id team)})
+
+            library2 (th/create-file* 3 {:profile-id (:id owner)
+                                         :project-id (:id project)
+                                         :is-shared true
+                                         :name "Icons Library"})
+
+            result   (-> th/*system*
+                         (assoc ::bfc/project-id (:id project))
+                         (assoc ::bfc/profile-id (:id viewer))
+                         (assoc ::bfc/team-id (:id team))
+                         (assoc ::bfc/input output)
+                         (v3/import-files!))]
+
+        ;; Auto-link must be skipped because viewer cannot edit the library
+        (t/is (= [] (:auto-linked result)))
+
+        ;; No file-library-rel should have been created
+        (let [rels (db/query th/*system* :file-library-rel
+                             {:library-file-id (:id library2)})]
+          (t/is (= 0 (count rels))))
+
+        ;; Control: the same import performed by the owner (who has edit
+        ;; permission on the library) should auto-link.
+        (let [result (-> th/*system*
+                         (assoc ::bfc/project-id (:id project))
+                         (assoc ::bfc/profile-id (:id owner))
+                         (assoc ::bfc/team-id (:id team))
+                         (assoc ::bfc/input output)
+                         (v3/import-files!))]
+
+          (t/is (= 1 (count (:auto-linked result))))
+          (t/is (= (:id library2) (:new-id (first (:auto-linked result)))))
+          (let [rels (db/query th/*system* :file-library-rel
+                               {:library-file-id (:id library2)})]
+            (t/is (= 1 (count rels)))))))))
+
+(t/deftest import-auto-link-only-files-that-used-library
+  (let [profile (th/create-profile* 1)
+        library (th/create-file* 1 {:profile-id (:id profile)
+                                    :project-id (:default-project-id profile)
+                                    :is-shared true
+                                    :name "Icons Library"})
+        file1   (th/create-file* 2 {:profile-id (:id profile)
+                                    :project-id (:default-project-id profile)
+                                    :is-shared false})
+        file2   (th/create-file* 3 {:profile-id (:id profile)
+                                    :project-id (:default-project-id profile)
+                                    :is-shared false})]
+
+    ;; Only file1 uses the library
+    (db/insert! th/*system* :file-library-rel
+                {:file-id (:id file1)
+                 :library-file-id (:id library)})
+
+    ;; Export both files without including libraries
+    (let [output (tmp/tempfile :suffix ".zip")]
+      (v3/export-files!
+       (-> th/*system*
+           (assoc ::bfc/ids #{(:id file1) (:id file2)})
+           (assoc ::bfc/embed-assets false)
+           (assoc ::bfc/include-libraries false))
+       (io/output-stream output))
+
+      ;; Remove the source library and recreate a matching one
+      (db/update! th/*system* :file
+                  {:deleted-at (ct/now)}
+                  {:id (:id library)})
+
+      (let [library2 (th/create-file* 4 {:profile-id (:id profile)
+                                         :project-id (:default-project-id profile)
+                                         :is-shared true
+                                         :name "Icons Library"})
+
+            result   (-> th/*system*
+                         (assoc ::bfc/project-id (:default-project-id profile))
+                         (assoc ::bfc/profile-id (:id profile))
+                         (assoc ::bfc/team-id (:default-team-id profile))
+                         (assoc ::bfc/input output)
+                         (v3/import-files!))]
+
+        ;; The library should be auto-linked
+        (t/is (= 1 (count (:auto-linked result))))
+        (t/is (= (:id library2) (:new-id (first (:auto-linked result)))))
+        (t/is (= {} (:library-candidates result)))
+
+        ;; But only one file-library-rel should exist (for file1)
+        (let [rels (db/query th/*system* :file-library-rel
+                             {:library-file-id (:id library2)})]
+          (t/is (= 1 (count rels))))))))
