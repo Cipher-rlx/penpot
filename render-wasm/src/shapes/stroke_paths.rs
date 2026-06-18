@@ -55,27 +55,27 @@ pub fn stroke_to_path(
         return None;
     }
 
-    // For inner/outer strokes, use boolean ops to clip
-    // the 2×-width stroke outline to the correct region.
-    // Set EvenOdd to preserve the annular ring's inner hole,
-    // then switch to Winding for Penpot's NonZero fill rule.
-    // Use set_fill_type instead of as_winding() because as_winding()
-    // decomposes self-intersecting geometry, which removes points
-    // at intersections of straight lines in closed paths.
-    // Center strokes skip the conversion: fill_path_with_paint
-    // already produces correctly-wound contours.
+    // Inner/outer strokes clip the 2×-width stroke outline to the
+    // correct region with a boolean op; Skia tags the op result
+    // EvenOdd, which keeps the annular ring's inner hole.
+    //
+    // Center strokes are not clipped, so the raw stroker output still
+    // carries miter self-overlaps at the corners: rendered NonZero it
+    // fills the hole, rendered EvenOdd it notches the corners.
+    // simplify() resolves those self-overlaps into a clean annulus
+    // (also tagged EvenOdd), giving an empty hole and sharp corners.
+    //
+    // In every case the EvenOdd fill rule is propagated to the
+    // converted shape by `convert_stroke_to_path` (the flat segment
+    // list itself can't carry a fill rule).
     let final_path = match render_kind {
-        StrokeKind::Inner => {
-            stroke_outline
-                .op(&transformed_shape_path, skia::PathOp::Intersect)
-                .unwrap_or(stroke_outline)
-        }
-        StrokeKind::Outer => {
-            stroke_outline
-                .op(&transformed_shape_path, skia::PathOp::Difference)
-                .unwrap_or(stroke_outline)
-        }
-        StrokeKind::Center => stroke_outline,
+        StrokeKind::Inner => stroke_outline
+            .op(&transformed_shape_path, skia::PathOp::Intersect)
+            .unwrap_or(stroke_outline),
+        StrokeKind::Outer => stroke_outline
+            .op(&transformed_shape_path, skia::PathOp::Difference)
+            .unwrap_or(stroke_outline),
+        StrokeKind::Center => stroke_outline.simplify().unwrap_or(stroke_outline),
     };
 
     // If there was a path_transform, invert it back to local coords

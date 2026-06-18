@@ -243,6 +243,7 @@ pub extern "C" fn current_to_path() -> *mut u8 {
 #[no_mangle]
 pub extern "C" fn convert_stroke_to_path(stroke_index: i32) -> *mut u8 {
     let mut result = Vec::<RawSegmentData>::default();
+    let mut even_odd = false;
     with_current_shape!(state, |shape: &Shape| {
         let idx = stroke_index as usize;
         if let Some(stroke) = shape.strokes.get(idx) {
@@ -257,6 +258,12 @@ pub extern "C" fn convert_stroke_to_path(stroke_index: i32) -> *mut u8 {
                 shape.svg_attrs.as_ref(),
                 false,
             ) {
+                // Inner/outer stroke rings come back EvenOdd (the boolean op
+                // keeps the hole that way). The flat segment list can't carry
+                // a fill rule, so signal it to the caller, which recreates the
+                // path shape with a matching fill rule — otherwise the hole
+                // fills under the default NonZero winding.
+                even_odd = path.is_even_odd();
                 result = path
                     .segments()
                     .iter()
@@ -267,7 +274,15 @@ pub extern "C" fn convert_stroke_to_path(stroke_index: i32) -> *mut u8 {
         }
     });
 
-    mem::write_vec(result)
+    let ptr = mem::write_vec(result);
+    // Pack the even-odd flag into the high bit of the little-endian u32
+    // length header (segment counts never approach 2^31).
+    if even_odd {
+        unsafe {
+            *ptr.add(3) |= 0x80;
+        }
+    }
+    ptr
 }
 
 #[cfg(test)]
